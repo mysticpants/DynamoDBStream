@@ -1,0 +1,15 @@
+{
+  "description": "A wrapper around the AWS DynamoDB Streams SDK that outputs data in the streams as a series of asynchronous events",
+  "version": "0.0.1",
+
+  "repository": {
+	"type": "git",
+	"url": "git@bitbucket.org:mysticpants/dynamodbstream.git",
+	"private": false
+  },
+
+  "dependencies": {
+    "async": "^2.0.0",
+    "aws-sdk": "~2.3.4"
+  }
+}
