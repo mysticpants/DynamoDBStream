@@ -2,6 +2,8 @@
 //SETUP
 //==============================
 
+const SHARD_CHECK_TIME = 60000;
+
 // Libraries
 var fs = require('fs'),
     AWS = require('aws-sdk'),
@@ -32,6 +34,7 @@ function DynamoDBStream(tableName, config, streamArn, previousShards) {
     // Attributes
     this._streamArn = streamArn;
     this._shardSequenceNumbers = (typeof previousShards == "object") ? previousShards : {};
+    this._pollingShards = {};
 
     // event handlers
     this._onRecord = null;      // To be called whenever a record is received
@@ -41,6 +44,8 @@ function DynamoDBStream(tableName, config, streamArn, previousShards) {
     // default limit, run forever
     this._endTime = null;
 
+    // Once a minute check the shards for changes
+    this._shardCheckTimer = setInterval(this._shardCheck.bind(this), SHARD_CHECK_TIME);
 }
 //::::::::::::::::::::::::::::::
 
@@ -95,67 +100,7 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
             // Function that iterates over each shard
             function _shardIterator(shard, next) {
 
-                // Ignore closed shards
-                if (shard.ShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ShardId] == "closed") {
-                    // console.log("Skipping closed shard: " + shard.ShardId)
-                    return next();
-                } else {
-                    // console.log("Processing shard: " + shard.ShardId)
-                }
-
-                this._getIterator(shard, function(err, iterator) {
-
-                    if (err) return next(err);
-                    async.doWhilst(
-
-                        //..............................
-                        function _eachIterator(callback) {
-
-                            this._getRecords(iterator, function(err, records, nextIterator) {
-
-                                iterator = nextIterator;
-
-                                async.eachSeries(records, 
-
-                                    //..............................
-                                    // Function that iterates over each record
-                                    function _recordEvent(record, next) {
-
-                                        this._onRecord(this._tableName, shard, record, next);
-
-                                    }.bind(this),
-
-                                    //..............................
-                                    // Callback that runs after last iteration of "_recordEvent"
-                                    function _recordCallback(err) {
-
-                                        callback(err);
-
-                                    }.bind(this)
-                                )
-
-                            }.bind(this));
-                        }.bind(this),
-
-                        //..............................
-                        function _eachIteratorTest() {
-                            if (this._endTime == null || new Date().getTime() < this._endTime) {
-                                // We still have time, has the shard finished?
-                                return !(iterator == null || iterator == undefined);
-                            } else {
-                                // Timeout
-                                return false;
-                            }
-                        }.bind(this),
-
-                        //..............................
-                        function _eachIteratorFinish(err) {
-                            next(err);
-                        }.bind(this)
-
-                    )
-                
-                }.bind(this))
+                this._pollShard(shard, next);
 
             }.bind(this),
 
@@ -163,9 +108,7 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
             // Callback that runs after last iteration of "_shardIterator"
             function _shardCallback(err) {
 
-                if (this._onFinished) {
-                    this._onFinished(err)
-                }
+                // Nothing to do 
 
             }.bind(this)
         )
@@ -263,6 +206,117 @@ DynamoDBStream.prototype._getRecords = function(iterator, callback) {
         }
 
     });
+
+}
+//::::::::::::::::::::::::::::::
+
+
+//::::::::::::::::::::::::::::::
+// Polls the shard until the end of time.
+DynamoDBStream.prototype._pollShard = function(shard, next) {
+
+    // Ignore closed shards
+    if (shard.ShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ShardId] == "closed") {
+        // console.log("Skipping closed shard: " + shard.ShardId)
+        return next();
+    } else {
+        // console.log("Processing shard: " + shard.ShardId)
+    }
+
+    // Get the initial state of the iterator
+    this._getIterator(shard, function(err, iterator) {
+
+        if (err) return next(err);
+
+        // Register that we are polling this shard
+        this._pollingShards[shard.ShardId] = true;
+
+        async.doWhilst(
+
+            //..............................
+            // With each iterators grab all the records
+            function _eachIterator(callback) {
+
+                this._getRecords(iterator, function(err, records, nextIterator) {
+
+                    // Store the next iterator if there is one
+                    iterator = nextIterator;
+
+                    // Process each record in order
+                    async.eachSeries(records, 
+
+                        //..............................
+                        // Iterate over each record
+                        function _recordEvent(record, next) {
+
+                            this._onRecord(this._tableName, shard, record, next);
+
+                        }.bind(this),
+
+                        //..............................
+                        // All records have been drained from this iterator
+                        function _recordCallback(err) {
+
+                            callback(err);
+
+                        }.bind(this)
+                    )
+
+                }.bind(this));
+            }.bind(this),
+
+            //..............................
+            // Check if there are any more iterators to process ... or if we have run out of time
+            function _eachIteratorTest() {
+                if (this._endTime == null || new Date().getTime() < this._endTime) {
+                    // We still have time, has the shard finished?
+                    return !(iterator == null || iterator == undefined);
+                } else {
+                    // Timeout
+                    return false;
+                }
+            }.bind(this),
+
+            //..............................
+            // All finished with this shard.
+            function _eachIteratorFinish(err) {
+                
+                // We are finished polling this shard
+                delete this._pollingShards[shard.ShardId];
+
+                // If we are finish polling all shards, then we are done with this stream
+                if (this._onFinished && Object.keys(this._pollingShards).length == 0) {
+                    this._onFinished(err)
+                }
+
+                next(err);
+            }.bind(this)
+
+        )
+    
+    }.bind(this))
+}
+//::::::::::::::::::::::::::::::
+
+
+//::::::::::::::::::::::::::::::
+// Check for new shards in the stream
+DynamoDBStream.prototype._shardCheck = function() {
+
+    // Get all the shards
+    this._getShards(function(err, shards) {
+
+        // Loop through all the shards and see if there are any new shards
+        shards.forEach(function(shard) {
+
+            if (!(shard.ShardId in this._shardSequenceNumbers)) {
+                // console.log("New shardId: " + shard.ShardId);
+                this._pollShard(shard, function() {});
+            }
+
+        }.bind(this));
+
+    }.bind(this));
 
 }
 //::::::::::::::::::::::::::::::
