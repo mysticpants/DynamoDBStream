@@ -49,6 +49,7 @@ function DynamoDBStream(tableName, config, streamArn, previousShards) {
 
 	// default limit, run forever
     this._endTime = null;
+    this._onFinished = null;
 
 }
 //::::::::::::::::::::::::::::::
@@ -78,10 +79,16 @@ DynamoDBStream.prototype.onSequenceNumbers = function(callback) {
 
 // The main function which executes the other functions
 //::::::::::::::::::::::::::::::
-DynamoDBStream.prototype.Run = function(limit_seconds) {
+DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
 
     // Set end time for loop with a 10% wiggle
-	if (limit_seconds) {
+	if (typeof limit_seconds == "function") {
+        callback = limit_seconds;
+        limit_seconds = undefined;
+    } 
+    this._onFinished = callback;
+
+    if (limit_seconds) {
 		var wiggle = limit_seconds * 0.1 * Math.random();
 		var timeLimit = Math.round((limit_seconds - wiggle) * 1000);
 		this._endTime = new Date().getTime() + timeLimit;
@@ -153,8 +160,7 @@ DynamoDBStream.prototype.Run = function(limit_seconds) {
                     function _recordCallback(err) {
 
                         // Set the interval to 5 (as if no data has been received)
-                        this._pollStreamInterval = (records.length == 0) ? WAIT_AFTER_NO_DATA : WAIT_AFTER_DATA;
-                        this._finish(err);
+                        this._finish(err, records.length);
 
                     }.bind(this)
                 )
@@ -247,14 +253,27 @@ DynamoDBStream.prototype._getRecords = function(iterator, callback) {
 
 // Cleans up when the whole run loop is finished
 //::::::::::::::::::::::::::::::
-DynamoDBStream.prototype._finish = function(err) {
+DynamoDBStream.prototype._finish = function(err, records) {
 
     if (err) {
+
         console.error(err);
         this._pollStreamInterval = WAIT_AFTER_ERROR;
         this._restart();
+
     } else {
-        this._onSequenceNumbers(this._tableName, this._shardSequenceNumbers, this._restart.bind(this));
+
+        if (records == 0) {
+            this._pollStreamInterval = WAIT_AFTER_NO_DATA;
+
+            // No need to update the sequence numbers
+            this._restart();
+        } else {
+            this._pollStreamInterval = WAIT_AFTER_DATA;
+
+            // Update the sequence numbers and restart
+            this._onSequenceNumbers(this._tableName, this._shardSequenceNumbers, this._restart.bind(this));
+        }
     }
 
 }
@@ -270,8 +289,7 @@ DynamoDBStream.prototype._restart = function() {
         setTimeout(this.Run.bind(this), this._pollStreamInterval)
         // console.log("Looping around for another run in " + (this._pollStreamInterval/1000) + "s")
     } else {
-        console.log("Finished!")
-        process.exit();
+        if (this._onFinished) this._onFinished();
     }
 
 }
