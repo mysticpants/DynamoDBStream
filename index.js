@@ -10,11 +10,11 @@ var fs = require('fs'),
 
 // Constants defining the level of parallelism (using async).
 const GET_ITERATOR_LIMIT = 10;
-const ON_RECORD_LIMIT = 10;
 
 // Constants defining the wait periods between loops
-const WAIT_AFTER_ERROR = 60000;
+const WAIT_AFTER_DATA = 0;
 const WAIT_AFTER_NO_DATA = 5000;
+const WAIT_AFTER_ERROR = 60000;
 
 //==============================
 //CLASSES
@@ -29,12 +29,13 @@ const WAIT_AFTER_NO_DATA = 5000;
 //::::::::::::::::::::::::::::::
 module.exports = DynamoDBStream
 
-function DynamoDBStream(config, streamArn, previousShards) {
+function DynamoDBStream(tableName, config, streamArn, previousShards) {
 
     // Set AWS Config
     var creds = new AWS.Credentials(config.accessKeyId, config.secretAccessKey);
 
     // Initialise DynamoDB Object and DynamoDB Stream Object
+    this._tableName = tableName;
     this._dynamodbstreams = new AWS.DynamoDBStreams({"credentials": creds, "region": config.region});
 
     // Attributes
@@ -44,7 +45,7 @@ function DynamoDBStream(config, streamArn, previousShards) {
 
     // event handlers
     this._onRecord = null; // To be called whenever a record is received
-    this._onSequenceNumber = null; // To be called whenever new records have been read from a shard
+    this._onSequenceNumbers = null; // To be called whenever new records have been read from a shard
 
 	// default limit, run forever
     this._endTime = null;
@@ -68,9 +69,9 @@ DynamoDBStream.prototype.onRecord = function(callback) {
 
 // Function that sets the "_onRecord" callback
 //::::::::::::::::::::::::::::::
-DynamoDBStream.prototype.onSequenceNumber = function(callback) {
+DynamoDBStream.prototype.onSequenceNumbers = function(callback) {
 
-    this._onSequenceNumber = callback;
+    this._onSequenceNumbers = callback;
 
 }
 //::::::::::::::::::::::::::::::
@@ -86,95 +87,86 @@ DynamoDBStream.prototype.Run = function(limit_seconds) {
 		this._endTime = new Date().getTime() + timeLimit;
 	}
 
-
-    // EXECUTE
-    //------------------------------
+    //..............................
+    // Get the shards for the current table
     this._getShards(function(err, shards) {
 
-        // Set the interval to 5 (as if no data has been received)
-        this._pollStreamInterval = WAIT_AFTER_NO_DATA;
+        //..............................
+        // Loop over each of the shards im parallel and collate the results
+        async.mapLimit(shards, GET_ITERATOR_LIMIT,
 
-        async.eachLimit(shards, GET_ITERATOR_LIMIT,
-            // Function that iterates over each shard
             //..............................
+            // Function that iterates over each shard
             function _shardIterator(shard, next) {
 
-                // console.log("\n\nProcessing shard ", shard.ShardId);
                 this._getIterator(shard, function(err, iterator) {
 
-                    // console.log(iterator);
+                    if (err) return next(err);
                     this._getRecords(iterator, function(err, records) {
 
-                        // console.log(records);
-                        async.eachLimit(records, ON_RECORD_LIMIT,
-                            // Function that iterates over each record
-                            //..............................
-                            function _recordIterator(record, next) {
+                        // Store the last sequence number for later
+                        if (records.length > 0) {
+                            this._shardSequenceNumbers[shard.ShardId] = records[records.length - 1].dynamodb.SequenceNumber;
+                        }
 
-                                this._onRecord(record, next);
-
-                            }.bind(this),
-                            //..............................
-
-                            // Callback that runs after last iteration of "_recordIterator"
-                            //..............................
-                            function _recordCallback(err) {
-
-                                if (err) {
-                                    console.error(err);
-                                    next(err);
-                                } else if (records.length > 0) {
-
-                                    // console.log("Finished reading records");
-
-                                    // Set interval to 0 if any data is received
-                                    this._pollStreamInterval = 0;
-                                    this._shardSequenceNumbers[shard.ShardId] = records[records.length - 1].dynamodb.SequenceNumber;
-                                    this._onSequenceNumber(shard.ShardId, records[records.length - 1].dynamodb.SequenceNumber, next);
-
-                                } else {
-                                    next(err);
-                                }
-
-                            }.bind(this)
-                            //..............................
-                        );
+                        // We have all the records for this shard
+                        next(err, records);
 
                     }.bind(this));
 
                 }.bind(this));
 
             }.bind(this),
-            //..............................
 
+            //..............................
             // Callback that runs after last iteration of "_shardIterator"
-            //..............................
-            function _shardCallback(err) {
+            function _shardCallback(err, records) {
 
-                if (err) {
-                    console.log(err);
-                    this._pollStreamInterval = WAIT_AFTER_ERROR;
-                } else {
-                    // console.log("Finished processing shards");
+                // Flatten the array of arrays of records to a single array of records.
+                var records2 = [];
+                if (typeof records == "object" && records.length > 0) {
+                    records.forEach(function(recordset) {
+                        recordset.forEach(function(record) {
+                            records2.push(record);
+                        })
+                    })
                 }
 
-                // Delay before starting the next loop
-                if (this._endTime == null || new Date().getTime() < this._endTime) {
-                    setTimeout(this.Run.bind(this), this._pollStreamInterval)
-                    // console.log("Looping around for another run in " + (this._pollStreamInterval/1000) + "s")
-                } else {
-                    // console.log("Finished!")
-                }
+                // Replace the original records list with the new flatter one
+                records = null;
+                records = records2;
+                records2 = null;
+
+                // console.log("Finished retrieving records from shards");
+                async.eachSeries(records, 
+
+                    //..............................
+                    // Function that iterates over each record
+                    function _recordEvent(record, next) {
+
+                        this._onRecord(this._tableName, record, next);
+
+                    }.bind(this),
+
+                    //..............................
+                    // Callback that runs after last iteration of "_recordEvent"
+                    function _recordCallback(err) {
+
+                        // Set the interval to 5 (as if no data has been received)
+                        this._pollStreamInterval = (records.length == 0) ? WAIT_AFTER_NO_DATA : WAIT_AFTER_DATA;
+                        this._finish(err);
+
+                    }.bind(this)
+                )
 
             }.bind(this)
-            //..............................
-        );
+        )
 
-    }.bind(this));
-    //------------------------------
+    }.bind(this))
 
 }
 //::::::::::::::::::::::::::::::
+
 
 //==============================
 // PRIVATE METHODS
@@ -191,8 +183,6 @@ DynamoDBStream.prototype._getShards = function(callback) {
 
     // Get list of Shards and Shard iterators
     this._dynamodbstreams.describeStream(params, function(err, data) {
-
-        if (err) console.error(err);
 
         // List of all shards in an array
         var shards = data.StreamDescription.Shards;
@@ -229,9 +219,6 @@ DynamoDBStream.prototype._getIterator = function(shard, callback) {
 
     this._dynamodbstreams.getShardIterator(params, function(err, data) {
 
-        if (err) {
-            console.error(err);
-        }
         callback(err, data.ShardIterator);
 
     });
@@ -250,15 +237,46 @@ DynamoDBStream.prototype._getRecords = function(iterator, callback) {
     // Get Records for the shard
     this._dynamodbstreams.getRecords(params, function(err, data) {
 
-        if (err) {
-            console.error(err);
-        }
         callback(err, data.Records);
 
     });
 
 }
 //::::::::::::::::::::::::::::::
+
+
+// Cleans up when the whole run loop is finished
+//::::::::::::::::::::::::::::::
+DynamoDBStream.prototype._finish = function(err) {
+
+    if (err) {
+        console.error(err);
+        this._pollStreamInterval = WAIT_AFTER_ERROR;
+        this._restart();
+    } else {
+        this._onSequenceNumbers(this._tableName, this._shardSequenceNumbers, this._restart.bind(this));
+    }
+
+}
+//::::::::::::::::::::::::::::::
+
+
+// Restarts the next loop or stops altogether
+//::::::::::::::::::::::::::::::
+DynamoDBStream.prototype._restart = function() {
+
+    // Delay before starting the next loop
+    if (this._endTime == null || new Date().getTime() < this._endTime) {
+        setTimeout(this.Run.bind(this), this._pollStreamInterval)
+        // console.log("Looping around for another run in " + (this._pollStreamInterval/1000) + "s")
+    } else {
+        console.log("Finished!")
+        process.exit();
+    }
+
+}
+//::::::::::::::::::::::::::::::
+
 
 
 //==============================
