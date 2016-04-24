@@ -108,7 +108,10 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
             // Callback that runs after last iteration of "_shardIterator"
             function _shardCallback(err) {
 
-                // Nothing to do 
+                // If we are finish polling all shards, then we are done with this stream
+                if (this._onFinished && Object.keys(this._pollingShards).length == 0) {
+                    this._onFinished(err)
+                }
 
             }.bind(this)
         )
@@ -283,13 +286,8 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
                 
                 // We are finished polling this shard
                 delete this._pollingShards[shard.ShardId];
-
-                // If we are finish polling all shards, then we are done with this stream
-                if (this._onFinished && Object.keys(this._pollingShards).length == 0) {
-                    this._onFinished(err)
-                }
-
                 next(err);
+
             }.bind(this)
 
         )
@@ -306,12 +304,21 @@ DynamoDBStream.prototype._shardCheck = function() {
     // Get all the shards
     this._getShards(function(err, shards) {
 
+        if (err) return console.error(err);
+
         // Loop through all the shards and see if there are any new shards
         shards.forEach(function(shard) {
 
             if (!(shard.ShardId in this._shardSequenceNumbers)) {
-                // console.log("New shardId: " + shard.ShardId);
-                this._pollShard(shard, function() {});
+                console.log("New shardId: " + shard.ShardId);
+                this._pollShard(shard, function(err) {
+
+                    // If we are finish polling all shards, then we are done with this stream
+                    if (this._onFinished && Object.keys(this._pollingShards).length == 0) {
+                        this._onFinished(err)
+                    }
+
+                });
             }
 
         }.bind(this));
