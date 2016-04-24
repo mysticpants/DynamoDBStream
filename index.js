@@ -162,7 +162,7 @@ DynamoDBStream.prototype._getIterator = function(shard, callback) {
         StreamArn: this._streamArn
     };
 
-    if (shard.ShardId in this._shardSequenceNumbers) {
+    if (shard.ShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ShardId] != null) {
 
         // Set params for generating shard iterator
         params.ShardIteratorType = 'AFTER_SEQUENCE_NUMBER';
@@ -311,6 +311,7 @@ DynamoDBStream.prototype._shardCheck = function() {
 
             if (!(shard.ShardId in this._shardSequenceNumbers)) {
                 console.log("New shardId: " + shard.ShardId);
+				this._shardSequenceNumbers[shard.ShardId] = null;
                 this._pollShard(shard, function(err) {
 
                     // If we are finish polling all shards, then we are done with this stream
