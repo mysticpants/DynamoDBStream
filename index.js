@@ -3,6 +3,7 @@
 //==============================
 
 const SHARD_CHECK_TIME = 60000;
+const POLL_DELAY_TIME = 1000;
 
 // Libraries
 var fs = require('fs'),
@@ -246,6 +247,8 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
                     // Store the next iterator if there is one
                     iterator = nextIterator;
 
+                    var has_recorded_event = false;
+
                     // Process each record in order
                     async.eachSeries(records, 
 
@@ -253,6 +256,7 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
                         // Iterate over each record
                         function _recordEvent(record, next) {
 
+                            has_recorded_event = true;
                             this._onRecord(this._tableName, shard, record, next);
 
                         }.bind(this),
@@ -261,7 +265,10 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
                         // All records have been drained from this iterator
                         function _recordCallback(err) {
 
-                            callback(err);
+                            // Delay the starting of a new iterator for a moment (reduces load)
+                            setTimeout(function() {
+                                callback(err);
+                            }.bind(this), has_recorded_event ? 0 : POLL_DELAY_TIME)
 
                         }.bind(this)
                     )
