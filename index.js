@@ -172,6 +172,7 @@ DynamoDBStream.prototype._getIterator = function(shard, callback) {
 
         // Set params to for getting shard iterator
         params.ShardIteratorType = 'TRIM_HORIZON';
+        this._shardSequenceNumbers[shard.ShardId] = null;
 
     }
 
@@ -310,7 +311,7 @@ DynamoDBStream.prototype._shardCheck = function() {
         shards.forEach(function(shard) {
 
             if (!(shard.ShardId in this._shardSequenceNumbers)) {
-                console.log("New shardId: " + shard.ShardId);
+                console.log(new Date(), "New shardId for " + this._tableName + ": " + shard.ShardId);
 				this._shardSequenceNumbers[shard.ShardId] = null;
                 this._pollShard(shard, function(err) {
 
