@@ -39,7 +39,8 @@ function DynamoDBStream(tableName, config, streamArn, previousShards) {
 
     // event handlers
     this._onRecord = null;      // To be called whenever a record is received
-    this._onShardClosed = null; // To be called whenever a shard has been drained
+    this._onShardOpen = null;   // To be called whenever a new shard has been found
+    this._onShardClose = null; // To be called whenever a shard has been drained
     this._onFinished = null;    // To be called at the very end
 
     // default limit, run forever
@@ -65,9 +66,17 @@ DynamoDBStream.prototype.onRecord = function(callback) {
 
 
 //::::::::::::::::::::::::::::::
-// Function that sets the "_onRecord" callback
-DynamoDBStream.prototype.onShardClosed = function(callback) {
-    this._onShardClosed = callback;
+// Function that sets the "_onShardOpen" callback
+DynamoDBStream.prototype.onShardOpen = function(callback) {
+    this._onShardOpen = callback;
+}
+//::::::::::::::::::::::::::::::
+
+
+//::::::::::::::::::::::::::::::
+// Function that sets the "_onShardClose" callback
+DynamoDBStream.prototype.onShardClose = function(callback) {
+    this._onShardClose = callback;
 }
 //::::::::::::::::::::::::::::::
 
@@ -89,6 +98,20 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
         this._endTime = new Date().getTime() + timeLimit;
     }
 
+    // Make sure we have default handlers for all the callbacks
+    if (!this._onRecord) {
+        this._onRecord = function(tableName, shard, record, next) { next() }
+    }
+    if (!this._onShardOpen) {
+        this._onShardOpen = function(tableName, shard, next) { next() }
+    }
+    if (!this._onShardClose) {
+        this._onShardClose = function(tableName, shard, next) { next() }
+    }
+    if (!this._onFinished) {
+        this._onFinished = function(err) { }
+    }
+
     //..............................
     // Get the shards for the current table
     this._getShards(function(err, shards) {
@@ -101,7 +124,16 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
             // Function that iterates over each shard
             function _shardIterator(shard, next) {
 
-                this._pollShard(shard, next);
+                if (!(shard.ShardId in this._shardSequenceNumbers)) {
+                    // This is a new shard
+                    this._onShardOpen(this._tableName, shard, function() {
+                        this._pollShard(shard, next);
+                    }.bind(this))
+                } else {
+                    // This is an existing shard
+                    this._pollShard(shard, next);
+                }
+                
 
             }.bind(this),
 
@@ -110,8 +142,10 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
             function _shardCallback(err) {
 
                 // If we are finish polling all shards, then we are done with this stream
-                if (this._onFinished && Object.keys(this._pollingShards).length == 0) {
-                    this._onFinished(err)
+                if (Object.keys(this._pollingShards).length == 0) {
+
+                    this._onFinished(err);
+                
                 }
 
             }.bind(this)
@@ -224,8 +258,6 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
     if (shard.ShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ShardId] == "closed") {
         // console.log("Skipping closed shard: " + shard.ShardId)
         return next();
-    } else {
-        // console.log("Processing shard: " + shard.ShardId)
     }
 
     // Get the initial state of the iterator
@@ -236,11 +268,12 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
         // Register that we are polling this shard
         this._pollingShards[shard.ShardId] = true;
 
+        // KEep looping until the iterator runs dry
         async.doWhilst(
 
             //..............................
             // With each iterators grab all the records
-            function _eachIterator(callback) {
+            function _whileValidIterator(callback) {
 
                 this._getRecords(iterator, function(err, records, nextIterator) {
 
@@ -278,7 +311,7 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
 
             //..............................
             // Check if there are any more iterators to process ... or if we have run out of time
-            function _eachIteratorTest() {
+            function _whileValidIteratorTest() {
                 if (this._endTime == null || new Date().getTime() < this._endTime) {
                     // We still have time, has the shard finished?
                     return !(iterator == null || iterator == undefined);
@@ -290,11 +323,19 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
 
             //..............................
             // All finished with this shard.
-            function _eachIteratorFinish(err) {
+            function _whenIteratorRunsDry(err) {
                 
                 // We are finished polling this shard
                 delete this._pollingShards[shard.ShardId];
-                next(err);
+                if (iterator == null || iterator == undefined) {
+                    // This shard has closed
+                    this._onShardClose(this._tableName, shard, function() {
+                        next(err);
+                    }.bind(this));
+                } else {
+                    // This process has timed out
+                    next(err);                    
+                }
 
             }.bind(this)
 
@@ -318,16 +359,20 @@ DynamoDBStream.prototype._shardCheck = function() {
         shards.forEach(function(shard) {
 
             if (!(shard.ShardId in this._shardSequenceNumbers)) {
-                console.log(new Date(), "New shardId for " + this._tableName + ": " + shard.ShardId);
-				this._shardSequenceNumbers[shard.ShardId] = null;
-                this._pollShard(shard, function(err) {
 
-                    // If we are finish polling all shards, then we are done with this stream
-                    if (this._onFinished && Object.keys(this._pollingShards).length == 0) {
-                        this._onFinished(err)
-                    }
+                // We have a new shard
+                this._onShardOpen(this._tableName, shard, function() {
 
-                });
+                    // Start polling this new shard
+                    this._pollShard(shard, function(err) {
+
+                        // If we are finish polling all shards, then we are done with this stream
+                        if (Object.keys(this._pollingShards).length == 0) {
+                            this._onFinished(err)
+                        }
+
+                    }.bind(this));
+                }.bind(this));
             }
 
         }.bind(this));
