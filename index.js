@@ -2,8 +2,7 @@
 //SETUP
 //==============================
 
-const SHARD_CHECK_TIME = 60000;
-const POLL_DELAY_TIME = 1000;
+const POLL_DELAY_TIME = 200;
 
 // Libraries
 var fs = require('fs'),
