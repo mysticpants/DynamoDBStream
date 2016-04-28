@@ -35,19 +35,14 @@ function DynamoDBStream(tableName, config, streamArn, previousShards) {
     // Attributes
     this._streamArn = streamArn;
     this._shardSequenceNumbers = (typeof previousShards == "object") ? previousShards : {};
-    this._pollingShards = {};
 
     // event handlers
-    this._onRecord = null;      // To be called whenever a record is received
-    this._onShardOpen = null;   // To be called whenever a new shard has been found
-    this._onShardClose = null; // To be called whenever a shard has been drained
-    this._onFinished = null;    // To be called at the very end
+    this._onRecord = null;        // To be called whenever a record is received
+    this._onShardUpdate = null;   // To be called whenever a shard record needs updating
 
     // default limit, run forever
     this._endTime = null;
 
-    // Once a minute check the shards for changes
-    this._shardCheckTimer = setInterval(this._shardCheck.bind(this), SHARD_CHECK_TIME);
 }
 //::::::::::::::::::::::::::::::
 
@@ -66,31 +61,22 @@ DynamoDBStream.prototype.onRecord = function(callback) {
 
 
 //::::::::::::::::::::::::::::::
-// Function that sets the "_onShardOpen" callback
-DynamoDBStream.prototype.onShardOpen = function(callback) {
-    this._onShardOpen = callback;
-}
-//::::::::::::::::::::::::::::::
-
-
-//::::::::::::::::::::::::::::::
-// Function that sets the "_onShardClose" callback
-DynamoDBStream.prototype.onShardClose = function(callback) {
-    this._onShardClose = callback;
+// Function that sets the "_onShardUpdate" callback
+DynamoDBStream.prototype.onShardUpdate = function(callback) {
+    this._onShardUpdate = callback;
 }
 //::::::::::::::::::::::::::::::
 
 
 //::::::::::::::::::::::::::::::
 // The main function which executes the other functions
-DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
+DynamoDBStream.prototype.Run = function(limit_seconds, finished) {
 
     // Set end time for loop with a 10% wiggle
     if (typeof limit_seconds == "function") {
-        callback = limit_seconds;
+        finished = limit_seconds;
         limit_seconds = undefined;
     } 
-    this._onFinished = callback;
 
     if (limit_seconds) {
         var wiggle = limit_seconds * 0.1 * Math.random();
@@ -100,67 +86,13 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
 
     // Make sure we have default handlers for all the callbacks
     if (!this._onRecord) {
-        this._onRecord = function(tableName, shard, record, next) { next() }
+        this._onRecord = function(tableName, shard, record, next) { if (next) next() }
     }
-    if (!this._onShardOpen) {
-        this._onShardOpen = function(tableName, shard, next) { next() }
-    }
-    if (!this._onShardClose) {
-        this._onShardClose = function(tableName, shard, next) { next() }
-    }
-    if (!this._onFinished) {
-        this._onFinished = function(err) { }
+    if (!this._onShardUpdate) {
+        this._onShardUpdate = function(tableName, shard, seq, next) { if (next) next() }
     }
 
-    //..............................
-    // Get the shards for the current table
-    this._getShards(function(err, shards) {
-
-        //..............................
-        // Loop over each of the shards in parallel looking for results
-        async.each(shards, 
-
-            //..............................
-            // Function that iterates over each shard
-            function _shardIterator(shard, next) {
-                // Does this shard have an active parent?
-                if (!shard.ParentShardId || (shard.ParentShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ParentShardId] == "closed")) {
-
-                    // This shard doesn't have an active parent.
-                    if (shard.ShardId in this._shardSequenceNumbers) {
-                        // This is an existing shard
-                        this._pollShard(shard, next);
-                    } else {
-                        // This is a new shard
-                        this._onShardOpen(this._tableName, shard, function() {
-                            this._pollShard(shard, next);
-                        }.bind(this))
-                    }
-
-                } else {
-                    // Skip this shard until the parent has finished
-                    console.log("**** SHARD HAS AN ACTIVE PARENT ****", shard.ShardId, shard.ParentShardId)
-                    next();
-                }
-                
-
-            }.bind(this),
-
-            //..............................
-            // Callback that runs after last iteration of "_shardIterator"
-            function _shardCallback(err) {
-
-                // If we are finish polling all shards, then we are done with this stream
-                if (Object.keys(this._pollingShards).length == 0) {
-
-                    this._onFinished(err);
-                
-                }
-
-            }.bind(this)
-        )
-
-    }.bind(this))
+    this._startShards(finished);
 
 }
 //::::::::::::::::::::::::::::::
@@ -169,6 +101,56 @@ DynamoDBStream.prototype.Run = function(limit_seconds, callback) {
 //==============================
 // PRIVATE METHODS
 //==============================
+
+
+//::::::::::::::::::::::::::::::
+// Check for new shards in the stream
+DynamoDBStream.prototype._startShards = function(parentId, callback) {
+
+    if (typeof parentId == "function") {
+        callback = parentId;
+        parentId = null;
+    }
+
+    // Get all the shards
+    this._getShards(function(err, shards) {
+
+        if (err) return callback(err);
+
+        // Loop through all the shards and see if there are any new shards for this parent shard
+        async.each(shards, 
+
+            //..............................
+            // Function that iterates over each shard
+            function _forEachShard(shard, next) {
+
+                if (parentId == null || (shard.ParentShardId && shard.ParentShardId == parentId)) {
+                    // We have a matching shard
+                    this._pollShard(shard, next);
+                } else {
+                    next();
+                }
+
+            }.bind(this),
+
+            //..............................
+            // When all the shards are finished, check if we are all done
+            function _noMoreShards(err) {
+
+                // If we are finish polling all shards, then we are done with this stream
+                callback(err);
+
+            }.bind(this)
+
+        );
+
+        // We have finished looking for new shards
+    }.bind(this));
+
+}
+//::::::::::::::::::::::::::::::
+
+
 
 //::::::::::::::::::::::::::::::
 // Get all the shards in the stream
@@ -206,17 +188,21 @@ DynamoDBStream.prototype._getIterator = function(shard, callback) {
         StreamArn: this._streamArn
     };
 
-    if (shard.ShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ShardId] != null) {
+    var seq = null;
+    if (shard.ShardId in this._shardSequenceNumbers) {
+        seq = this._shardSequenceNumbers[shard.ShardId];
+    }
 
-        // Set params for generating shard iterator
-        params.ShardIteratorType = 'AFTER_SEQUENCE_NUMBER';
-        params.SequenceNumber = this._shardSequenceNumbers[shard.ShardId];
-
-    } else {
+    if (seq == null || seq == "new" || seq == "closed") {
 
         // Set params to for getting shard iterator
         params.ShardIteratorType = 'TRIM_HORIZON';
-        this._shardSequenceNumbers[shard.ShardId] = null;
+        this._shardSequenceNumbers[shard.ShardId] = "new";
+
+    } else {
+        // Set params for generating shard iterator
+        params.ShardIteratorType = 'AFTER_SEQUENCE_NUMBER';
+        params.SequenceNumber = this._shardSequenceNumbers[shard.ShardId];
 
     }
 
@@ -265,17 +251,46 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
 
     // Ignore closed shards
     if (shard.ShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ShardId] == "closed") {
-        // console.log("Skipping closed shard: " + shard.ShardId)
+        console.log("---- closed shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
         return next();
     }
+
+    // Does this shard have an active parent?
+    if (shard.ParentShardId && shard.ParentShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ParentShardId] != "closed") {
+        console.log("---- active parent:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
+        return next();
+    }
+
+    if (!(shard.ShardId in this._shardSequenceNumbers) || this._shardSequenceNumbers[shard.ShardId] == "new") {
+
+        // This is a new shard
+        console.log("++++ new shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
+        this._shardSequenceNumbers[shard.ShardId] = "new";
+        this._onShardUpdate(this._tableName, shard, "new", function() {
+            this._doPollShard(shard, next);
+        }.bind(this));
+
+    } else {
+
+        // This is an existing shard
+        console.log("++++ restart shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
+        this._doPollShard(shard, next);
+
+    }
+
+
+}
+//::::::::::::::::::::::::::::::
+
+
+//::::::::::::::::::::::::::::::
+// Polls the shard until the end of time.
+DynamoDBStream.prototype._doPollShard = function(shard, next) {
 
     // Get the initial state of the iterator
     this._getIterator(shard, function(err, iterator) {
 
         if (err) return next(err);
-
-        // Register that we are polling this shard
-        this._pollingShards[shard.ShardId] = true;
 
         // KEep looping until the iterator runs dry
         async.doWhilst(
@@ -335,12 +350,14 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
             function _whenIteratorRunsDry(err) {
                 
                 // We are finished polling this shard
-                delete this._pollingShards[shard.ShardId];
                 if (iterator == null || iterator == undefined) {
                     // This shard has closed
                     this._shardSequenceNumbers[shard.ShardId] = "closed";
-                    this._onShardClose(this._tableName, shard, function() {
-                        next(err);
+                    this._onShardUpdate(this._tableName, shard, "closed", function() {
+
+                        // Check for more shards
+                        this._startShards(shard.ShardId, next);                        
+
                     }.bind(this));
                 } else {
                     // This process has timed out
@@ -352,51 +369,9 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
         )
     
     }.bind(this))
-}
-//::::::::::::::::::::::::::::::
-
-
-//::::::::::::::::::::::::::::::
-// Check for new shards in the stream
-DynamoDBStream.prototype._shardCheck = function() {
-
-    // Get all the shards
-    this._getShards(function(err, shards) {
-
-        if (err) return console.error(err);
-
-        // Loop through all the shards and see if there are any new shards
-        shards.forEach(function(shard) {
-
-            // Does this shard have an active parent?
-            if (!shard.ParentShardId || (shard.ParentShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ParentShardId] == "closed")) {
-
-                if (!(shard.ShardId in this._shardSequenceNumbers)) {
-
-                    // We have a new shard
-                    this._onShardOpen(this._tableName, shard, function() {
-
-                        // Start polling this new shard
-                        this._pollShard(shard, function(err) {
-
-                            // If we are finish polling all shards, then we are done with this stream
-                            if (Object.keys(this._pollingShards).length == 0) {
-                                this._onFinished(err)
-                            }
-
-                        }.bind(this));
-                    }.bind(this));
-                }
-            } else {
-                // Skip this shard until the parent has finished
-                console.log("**** SHARD HAS AN ACTIVE PARENT ****", shard.ShardId, shard.ParentShardId)
-            }
-
-        }.bind(this));
-
-    }.bind(this));
 
 }
+
 //::::::::::::::::::::::::::::::
 
 
