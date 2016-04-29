@@ -127,6 +127,7 @@ DynamoDBStream.prototype._startShards = function(parentId, callback) {
                     // We have a matching shard
                     this._pollShard(shard, next);
                 } else {
+					console.log("---- filtered:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "Filter:", parentId, "####")
                     next();
                 }
 
@@ -250,20 +251,20 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
 
     // Ignore closed shards
     if (shard.ShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ShardId] == "closed") {
-        console.log("---- closed shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
+        console.log("---- closed shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "####")
         return next();
     }
 
     // Does this shard have an active parent?
     if (shard.ParentShardId && shard.ParentShardId in this._shardSequenceNumbers && this._shardSequenceNumbers[shard.ParentShardId] != "closed") {
-        console.log("---- active parent:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
+        console.log("---- active parent:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "####")
         return next();
     }
 
     if (!(shard.ShardId in this._shardSequenceNumbers) || this._shardSequenceNumbers[shard.ShardId] == "new") {
 
         // This is a new shard
-        console.log("++++ new shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
+        console.log("++++ new shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "####")
         this._shardSequenceNumbers[shard.ShardId] = "new";
         this._onShardUpdate(this._tableName, shard, "new", function() {
             this._doPollShard(shard, next);
@@ -272,7 +273,7 @@ DynamoDBStream.prototype._pollShard = function(shard, next) {
     } else {
 
         // This is an existing shard
-        console.log("++++ restart shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "****")
+        console.log("++++ restart shard:", "Table:", this._tableName, "Shard:", shard.ShardId, "Parent:", shard.ParentShardId, "####")
         this._doPollShard(shard, next);
 
     }
