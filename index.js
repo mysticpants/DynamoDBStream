@@ -355,8 +355,10 @@ DynamoDBStream.prototype._doPollShard = function(shard, next) {
                     this._shardSequenceNumbers[shard.ShardId] = "closed";
                     this._onShardUpdate(this._tableName, shard, "closed", function() {
 
-                        // Check for more shards
-                        this._startShards(shard.ShardId, next);                        
+                        // Check for more shards after a short delay
+						setTimeout(function() {
+							this._startShards(shard.ShardId, next);                        
+						}.bind(this), 10000);
 
                     }.bind(this));
                 } else {
