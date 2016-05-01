@@ -69,19 +69,14 @@ DynamoDBStream.prototype.onShardUpdate = function(callback) {
 
 //::::::::::::::::::::::::::::::
 // The main function which executes the other functions
-DynamoDBStream.prototype.Run = function(limit_seconds, finished) {
+DynamoDBStream.prototype.Run = function(end_time, finished) {
 
     // Set end time for loop with a 10% wiggle
-    if (typeof limit_seconds == "function") {
-        finished = limit_seconds;
-        limit_seconds = undefined;
+    if (typeof end_time == "function") {
+        finished = end_time;
+        end_time = undefined;
     } 
-
-    if (limit_seconds) {
-        var wiggle = limit_seconds * 0.1 * Math.random();
-        var timeLimit = Math.round((limit_seconds - wiggle) * 1000);
-        this._endTime = new Date().getTime() + timeLimit;
-    }
+	this._endTime = end_time || null;
 
     // Make sure we have default handlers for all the callbacks
     if (!this._onRecord) {
@@ -92,6 +87,8 @@ DynamoDBStream.prototype.Run = function(limit_seconds, finished) {
     }
 
     this._startShards(finished);
+
+	return this;
 
 }
 //::::::::::::::::::::::::::::::
