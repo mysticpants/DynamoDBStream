@@ -1,7 +1,7 @@
 {
   "name": "DynamoDBStream",
   "description": "A wrapper around the AWS DynamoDB Streams SDK that outputs data in the streams as a series of asynchronous events",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "license": "MIT",
   "author": {
     "name": "Drew"

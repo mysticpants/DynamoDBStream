@@ -2,7 +2,9 @@
 //SETUP
 //==============================
 
-const POLL_DELAY_TIME = 200;
+const POLL_DELAY_TIME_QUICK = 200;
+const POLL_DELAY_TIME_SLOW  = 500;
+const POLL_DELAY_TIME_RESTART = 10000;
 
 // Libraries
 var fs = require('fs'),
@@ -322,7 +324,7 @@ DynamoDBStream.prototype._doPollShard = function(shard, next) {
                             // Delay the starting of a new iterator for a moment (reduces load)
                             setTimeout(function() {
                                 callback(err);
-                            }.bind(this), has_recorded_event ? 0 : POLL_DELAY_TIME)
+                            }.bind(this), has_recorded_event ? POLL_DELAY_TIME_QUICK : POLL_DELAY_TIME_SLOW)
 
                         }.bind(this)
                     )
@@ -355,7 +357,7 @@ DynamoDBStream.prototype._doPollShard = function(shard, next) {
                         // Check for more shards after a short delay
 						setTimeout(function() {
 							this._startShards(shard.ShardId, next);                        
-						}.bind(this), 10000);
+						}.bind(this), POLL_DELAY_TIME_RESTART);
 
                     }.bind(this));
                 } else {
