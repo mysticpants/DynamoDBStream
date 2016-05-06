@@ -5,6 +5,7 @@
 const POLL_DELAY_TIME_QUICK = 200;
 const POLL_DELAY_TIME_SLOW  = 500;
 const POLL_DELAY_TIME_RESTART = 10000;
+const POLL_HEARTBEAT_TIME = 60000;
 
 // Libraries
 var fs = require('fs'),
@@ -43,6 +44,8 @@ function DynamoDBStream(tableName, config, streamArn, previousShards) {
 
     // default limit, run forever
     this._endTime = null;
+    this._heartBeatTime = null;
+	this._heartBeatTimer = setInterval(this._checkHeartBeat.bind(this), 1000);
 
 }
 //::::::::::::::::::::::::::::::
@@ -88,7 +91,11 @@ DynamoDBStream.prototype.Run = function(end_time, finished) {
         this._onShardUpdate = function(tableName, shard, seq, next) { if (next) next() }
     }
 
-    this._startShards(finished);
+    this._startShards(function(err) {
+		// Stop the heartbeart timer
+		if (this._heartBeatTimer) clearInterval(this._heartBeatTimer);
+		finished(err);
+	}.bind(this));
 
 	return this;
 
@@ -165,12 +172,13 @@ DynamoDBStream.prototype._getShards = function(callback) {
 
         // List of all shards in an array
         if (data && "StreamDescription" in data && "Shards" in data.StreamDescription) {
+			this._beatHeart();
             callback(err, data.StreamDescription.Shards);
         } else {
             callback(err);
         }
 
-    });
+    }.bind(this));
 
 }
 //::::::::::::::::::::::::::::::
@@ -208,12 +216,13 @@ DynamoDBStream.prototype._getIterator = function(shard, callback) {
     this._dynamodbstreams.getShardIterator(params, function(err, data) {
 
         if (data && "ShardIterator" in data) {
+			this._beatHeart();
             callback(err, data.ShardIterator);
         } else {
             callback(err);
         }
 
-    });
+    }.bind(this));
 
 }
 //::::::::::::::::::::::::::::::
@@ -231,6 +240,7 @@ DynamoDBStream.prototype._getRecords = function(iterator, callback) {
     this._dynamodbstreams.getRecords(params, function(err, data) {
 
         if (data) {
+			this._beatHeart();
             var records = ("Records" in data) ? data.Records : null;
             var nextIterator = ("NextShardIterator" in data) ? data.NextShardIterator : null;
             callback(err, records, nextIterator);
@@ -238,7 +248,7 @@ DynamoDBStream.prototype._getRecords = function(iterator, callback) {
             callback(err);
         }
 
-    });
+    }.bind(this));
 
 }
 //::::::::::::::::::::::::::::::
@@ -371,6 +381,21 @@ DynamoDBStream.prototype._doPollShard = function(shard, next) {
     
     }.bind(this))
 
+}
+
+//::::::::::::::::::::::::::::::
+// Beat the heart (it's alive)
+DynamoDBStream.prototype._beatHeart = function() {
+    this._heartBeatTime = new Date().getTime() + POLL_HEARTBEAT_TIME;
+}
+
+//::::::::::::::::::::::::::::::
+// Check the heart (is it alive?)
+DynamoDBStream.prototype._checkHeartBeat = function() {
+	if (this._heartBeatTime != null && new Date().getTime() > this._heartBeatTime) {
+		console.error(new Date(), "ERROR", "HEART ATTACK!", this._tableName);
+		process.exit();
+	}
 }
 
 //::::::::::::::::::::::::::::::
