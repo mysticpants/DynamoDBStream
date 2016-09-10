@@ -1,7 +1,7 @@
 {
   "name": "DynamoDBStream",
   "description": "A wrapper around the AWS DynamoDB Streams SDK that outputs data in the streams as a series of asynchronous events",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "license": "MIT",
   "author": {
     "name": "Drew"
@@ -16,12 +16,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@bitbucket.org/mysticpants/dynamodbstream.git"
+    "url": "git+ssh://git@github.com:mysticpants/DynamoDBStream.git"
   },
   "bugs": {
-    "url": "https://bitbucket.org/mysticpants/dynamodbstream/issues"
+    "url": "https://github.com/mysticpants/DynamoDBStream/issues"
   },
-  "homepage": "https://bitbucket.org/mysticpants/dynamodbstream/",
+  "homepage": "https://github.com/mysticpants/DynamoDBStream",
   "dependencies": {
     "async": "^1.5.2",
     "aws-sdk": "~2.3.4"
